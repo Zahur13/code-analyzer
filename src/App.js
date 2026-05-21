@@ -144,93 +144,129 @@ const parseProjectTemplate = (text) => {
   const files = [];
   let detectedProjectName = null;
 
-  const addFile = (path, content) => {
-    const trimmedPath = path.trim().replace(/^[├──|└──|│\s]+/, "");
-    if (!trimmedPath || trimmedPath.endsWith("/")) return;
-
-    const existing = files.find((f) => f.path === trimmedPath);
-    if (existing) {
-      if (content && !existing.content.includes(content)) {
-        existing.content += "\n\n" + content;
-      }
-    } else {
-      files.push({ path: trimmedPath, content: content || "" });
+  // 1. Robust Project Name Detection
+  const projectNamePatterns = [
+    /project_name\s*=\s*["']([^"']+)["']/,
+    /^([a-zA-Z0-9_-]+)\/\s*$/m,
+    /File Structure\s*\n\s*([a-zA-Z0-9_-]+)\//,
+    /folder\s*name\s*[:=]\s*([a-zA-Z0-9_-]+)/i,
+    /project\s*name\s*[:=]\s*([a-zA-Z0-9_-]+)/i,
+    /"name"\s*:\s*"([^"]+)"/,
+  ];
+  for (const pattern of projectNamePatterns) {
+    const match = text.match(pattern);
+    if (match) {
+      detectedProjectName = match[1];
+      break;
     }
-  };
-
-  // 1. Detect Project Name
-  const projectNameMatch =
-    text.match(/project_name\s*=\s*["']([^"']+)["']/) ||
-    text.match(/^([a-zA-Z0-9_-]+)\/\s*$/m) ||
-    text.match(/File Structure\s*\n\s*([a-zA-Z0-9_-]+)\//);
-  if (projectNameMatch) detectedProjectName = projectNameMatch[1];
-
-  // 2. Parse Python-style "files" dictionary if it exists
-  const pythonDictRegex = /"([^"]+)"\s*:\s*"""([\s\S]*?)"""/g;
-  let dictMatch;
-  while ((dictMatch = pythonDictRegex.exec(text)) !== null) {
-    addFile(dictMatch[1], dictMatch[2].trim());
   }
 
-  // 3. Parse Tree Structure & Numbered Lists
-  const lines = text.split("\n");
-  let lastDetectedPath = null;
+  // 2. Multi-Pass Path Discovery
+  const pathsFound = new Set();
 
-  lines.forEach((line, index) => {
-    const trimmed = line.trim();
+  // Tree structure: ├── path/to/file.js
+  const treeRegex = /^[├──|└──|│\s]*([a-zA-Z0-9_./-]+\.[a-z0-9]+)/gm;
+  let match;
+  while ((match = treeRegex.exec(text)) !== null) pathsFound.add(match[1]);
 
-    // Detect paths in tree: ├── path/to/file.js
-    const treePathMatch = trimmed.match(
-      /^[├──|└──|│\s]*([a-zA-Z0-9_./-]+\.[a-z0-9]+)/,
+  // Numbered list: 2. src/components/Employee.js
+  const listRegex = /^\d+\.\s+([a-zA-Z0-9_./-]+\.[a-z0-9]+)/gm;
+  while ((match = listRegex.exec(text)) !== null) pathsFound.add(match[1]);
+
+  // Python dict keys: "path/to/file.js":
+  const dictKeyRegex = /"([a-zA-Z0-9_./-]+\.[a-z0-9]+)"\s*:/g;
+  while ((match = dictKeyRegex.exec(text)) !== null) pathsFound.add(match[1]);
+
+  // Explicit markers: # file: path/to/file.js
+  const markerRegex = /^(?:\/\/|#)\s*file:\s*([a-zA-Z0-9_./-]+\.[a-z0-9]+)/gim;
+  while ((match = markerRegex.exec(text)) !== null) pathsFound.add(match[1]);
+
+  // Bolded paths: **src/App.js**
+  const boldPathRegex = /\*\*([a-zA-Z0-9_./-]+\.[a-z0-9]+)\*\*/g;
+  while ((match = boldPathRegex.exec(text)) !== null) pathsFound.add(match[1]);
+
+  // 3. Accurate Content Extraction & Mapping
+  const sortedPaths = Array.from(pathsFound).sort(
+    (a, b) => text.indexOf(a) - text.indexOf(b),
+  );
+
+  sortedPaths.forEach((path, idx) => {
+    let content = "";
+    const escapedPath = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+    // Pass A: Python triple-quoted content (highest precision)
+    const pythonContentRegex = new RegExp(
+      `["']${escapedPath}["']\\s*:\\s*"""([\\s\\S]*?)"""`,
+      "g",
     );
-    // Detect paths in numbered list: 2. src/components/Employee.js
-    const listPathMatch = trimmed.match(
-      /^\d+\.\s+([a-zA-Z0-9_./-]+\.[a-z0-9]+)/,
-    );
-    // Detect markers: # file: path
-    const markerMatch = trimmed.match(/^(?:\/\/|#)\s*file:\s*(.*)/i);
+    const pythonMatch = pythonContentRegex.exec(text);
+    if (pythonMatch) {
+      content = pythonMatch[1].trim();
+    }
 
-    const foundPath =
-      (treePathMatch && treePathMatch[1]) ||
-      (listPathMatch && listPathMatch[1]) ||
-      (markerMatch && markerMatch[1].trim());
+    // Pass B: Markdown Code Block following the path
+    if (!content) {
+      const pathIndex = text.indexOf(path);
+      if (pathIndex !== -1) {
+        const afterHeader = text.substring(pathIndex + path.length);
+        const nextPath = sortedPaths[idx + 1];
+        const nextPathIndex = nextPath
+          ? afterHeader.indexOf(nextPath)
+          : Infinity;
 
-    if (foundPath) {
-      lastDetectedPath = foundPath;
-      addFile(foundPath, "");
-    } else if (lastDetectedPath && trimmed === "Copy") {
-      // Look for the next code block after "Copy"
-      let content = [];
-      for (let i = index + 1; i < lines.length; i++) {
-        const nextLine = lines[i];
-        // Stop if we hit another path or a very different section
+        // Find the first code block before the next path
+        const mdMatch = afterHeader.match(
+          /\s*[\s\S]*?```[a-z]*\n([\s\S]*?)\n```/,
+        );
         if (
-          nextLine.match(/^\d+\.\s+([a-zA-Z0-9_./-]+\.[a-z0-9]+)/) ||
-          nextLine.match(/^[├──|└──]/)
-        )
-          break;
-        content.push(nextLine);
+          mdMatch &&
+          (nextPathIndex === -1 || mdMatch.index < nextPathIndex)
+        ) {
+          content = mdMatch[1].trim();
+        }
       }
-      // Basic heuristic: the content is usually between "Copy" and the next section
-      // We'll join and trim, but this is a rough extract
-      const extracted = content.join("\n").trim();
-      if (extracted) {
-        const file = files.find((f) => f.path === lastDetectedPath);
-        if (file) file.content = extracted;
+    }
+
+    // Pass C: "Copy" marker content
+    if (!content) {
+      const pathIndex = text.indexOf(path);
+      if (pathIndex !== -1) {
+        const afterHeader = text.substring(pathIndex + path.length);
+        const copyIndex = afterHeader.indexOf("Copy");
+        const nextPath = sortedPaths[idx + 1];
+        const nextPathIndex = nextPath
+          ? afterHeader.indexOf(nextPath)
+          : Infinity;
+
+        if (
+          copyIndex !== -1 &&
+          copyIndex < 300 &&
+          (nextPathIndex === -1 || copyIndex < nextPathIndex)
+        ) {
+          const afterCopy = afterHeader.substring(copyIndex + 4).trim();
+          // Take everything until the next path or end of text
+          const endOfContent = nextPath
+            ? afterCopy.indexOf(nextPath)
+            : afterCopy.length;
+          content = afterCopy.substring(0, endOfContent).trim();
+          // Clean up potential leading/trailing artifacts
+          content = content.replace(/^[\n\s]+/, "").replace(/[\n\s]+$/, "");
+        }
       }
+    }
+
+    if (path) {
+      // Cleanup: remove project root prefix from paths if detected
+      let finalPath = path;
+      if (detectedProjectName && path.startsWith(detectedProjectName + "/")) {
+        finalPath = path.substring(detectedProjectName.length + 1);
+      }
+
+      files.push({ path: finalPath, content: content || "" });
     }
   });
 
-  // 4. Heuristic fallback for general code blocks if not already associated
-  if (files.length === 0 || files.every((f) => !f.content)) {
-    const markdownRegex = /\*\*(.*?)\*\*\s*```[a-z]*\n([\s\S]*?)```/g;
-    let mdMatch;
-    while ((mdMatch = markdownRegex.exec(text)) !== null) {
-      addFile(mdMatch[1], mdMatch[2]);
-    }
-  }
-
-  return { files: files.filter((f) => f.path), detectedProjectName };
+  return { files, detectedProjectName };
 };
 
 const INPUT_MODES = [
