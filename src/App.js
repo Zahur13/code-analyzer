@@ -145,96 +145,92 @@ const parseProjectTemplate = (text) => {
   let detectedProjectName = null;
 
   const addFile = (path, content) => {
-    const trimmedPath = path.trim();
-    if (!trimmedPath) return;
-
-    // Extract project name from path if it's the first part and not a standard folder
-    const parts = trimmedPath.split("/");
-    if (parts.length > 1) {
-      const root = parts[0];
-      const standardFolders = [
-        "src",
-        "public",
-        "backend",
-        "node_modules",
-        "output",
-        "uploads",
-      ];
-      if (!standardFolders.includes(root)) {
-        if (!detectedProjectName) detectedProjectName = root;
-        // If we found a project root, we strip it from the path for internal storage
-        // so the tree starts from that root naturally
-      }
-    }
+    const trimmedPath = path.trim().replace(/^[├──|└──|│\s]+/, "");
+    if (!trimmedPath || trimmedPath.endsWith("/")) return;
 
     const existing = files.find((f) => f.path === trimmedPath);
     if (existing) {
-      existing.content += "\n\n" + content;
+      if (content && !existing.content.includes(content)) {
+        existing.content += "\n\n" + content;
+      }
     } else {
-      files.push({ path: trimmedPath, content });
+      files.push({ path: trimmedPath, content: content || "" });
     }
   };
 
-  // 1. First, check for explicit file markers (highest priority)
-  const commentFileRegex =
-    /(?:\/\/|#)\s*file:\s*(.*?)\s*\n([\s\S]*?)(?=(?:\/\/|#)\s*file:\s*|$)/gi;
-  let match;
-  let hasMarkers = false;
-  while ((match = commentFileRegex.exec(text)) !== null) {
-    addFile(match[1], match[2].trim());
-    hasMarkers = true;
+  // 1. Detect Project Name
+  const projectNameMatch =
+    text.match(/project_name\s*=\s*["']([^"']+)["']/) ||
+    text.match(/^([a-zA-Z0-9_-]+)\/\s*$/m) ||
+    text.match(/File Structure\s*\n\s*([a-zA-Z0-9_-]+)\//);
+  if (projectNameMatch) detectedProjectName = projectNameMatch[1];
+
+  // 2. Parse Python-style "files" dictionary if it exists
+  const pythonDictRegex = /"([^"]+)"\s*:\s*"""([\s\S]*?)"""/g;
+  let dictMatch;
+  while ((dictMatch = pythonDictRegex.exec(text)) !== null) {
+    addFile(dictMatch[1], dictMatch[2].trim());
   }
 
-  // 2. If no markers, analyze sections word-by-word to categorize them
-  if (!hasMarkers) {
-    // Detect project name from package.json if present
-    const nameMatch = text.match(/"name"\s*:\s*"([^"]+)"/);
-    if (nameMatch) detectedProjectName = nameMatch[1];
+  // 3. Parse Tree Structure & Numbered Lists
+  const lines = text.split("\n");
+  let lastDetectedPath = null;
 
-    const sections = text.split(
-      /\n\s*(?=\/\/|#|\/\*|import|const|function|class|def|@|module\.exports|{)/,
+  lines.forEach((line, index) => {
+    const trimmed = line.trim();
+
+    // Detect paths in tree: ├── path/to/file.js
+    const treePathMatch = trimmed.match(
+      /^[├──|└──|│\s]*([a-zA-Z0-9_./-]+\.[a-z0-9]+)/,
     );
+    // Detect paths in numbered list: 2. src/components/Employee.js
+    const listPathMatch = trimmed.match(
+      /^\d+\.\s+([a-zA-Z0-9_./-]+\.[a-z0-9]+)/,
+    );
+    // Detect markers: # file: path
+    const markerMatch = trimmed.match(/^(?:\/\/|#)\s*file:\s*(.*)/i);
 
-    sections.forEach((section) => {
-      const trimmed = section.trim();
-      if (!trimmed) return;
+    const foundPath =
+      (treePathMatch && treePathMatch[1]) ||
+      (listPathMatch && listPathMatch[1]) ||
+      (markerMatch && markerMatch[1].trim());
 
-      // Smart routing based on content analysis
-      if (
-        trimmed.includes("express") ||
-        trimmed.includes("multer") ||
-        trimmed.includes("app.listen")
-      ) {
-        addFile("backend/server.js", trimmed);
-      } else if (
-        trimmed.includes("import React") ||
-        trimmed.includes("export default")
-      ) {
-        addFile("src/App.js", trimmed);
-      } else if (
-        trimmed.includes("@tailwind") ||
-        trimmed.includes("body {") ||
-        /^\.[a-zA-Z]/.test(trimmed)
-      ) {
-        addFile("src/index.css", trimmed);
-      } else if (trimmed.includes("tailwind.config")) {
-        addFile("tailwind.config.js", trimmed);
-      } else if (trimmed.includes('"dependencies":')) {
-        if (trimmed.includes("express"))
-          addFile("backend/package.json", trimmed);
-        else addFile("package.json", trimmed);
-      } else if (
-        trimmed.startsWith("def ") ||
-        trimmed.startsWith("class ") ||
-        trimmed.includes("import ")
-      ) {
-        // If it looks like python but no clear path, default to main.py
-        addFile("main.py", trimmed);
+    if (foundPath) {
+      lastDetectedPath = foundPath;
+      addFile(foundPath, "");
+    } else if (lastDetectedPath && trimmed === "Copy") {
+      // Look for the next code block after "Copy"
+      let content = [];
+      for (let i = index + 1; i < lines.length; i++) {
+        const nextLine = lines[i];
+        // Stop if we hit another path or a very different section
+        if (
+          nextLine.match(/^\d+\.\s+([a-zA-Z0-9_./-]+\.[a-z0-9]+)/) ||
+          nextLine.match(/^[├──|└──]/)
+        )
+          break;
+        content.push(nextLine);
       }
-    });
+      // Basic heuristic: the content is usually between "Copy" and the next section
+      // We'll join and trim, but this is a rough extract
+      const extracted = content.join("\n").trim();
+      if (extracted) {
+        const file = files.find((f) => f.path === lastDetectedPath);
+        if (file) file.content = extracted;
+      }
+    }
+  });
+
+  // 4. Heuristic fallback for general code blocks if not already associated
+  if (files.length === 0 || files.every((f) => !f.content)) {
+    const markdownRegex = /\*\*(.*?)\*\*\s*```[a-z]*\n([\s\S]*?)```/g;
+    let mdMatch;
+    while ((mdMatch = markdownRegex.exec(text)) !== null) {
+      addFile(mdMatch[1], mdMatch[2]);
+    }
   }
 
-  return { files, detectedProjectName };
+  return { files: files.filter((f) => f.path), detectedProjectName };
 };
 
 const INPUT_MODES = [
@@ -588,10 +584,9 @@ const App = () => {
     } else if (inputMode === "raw") {
       files = parseTextRaw(inputText, rawFileName);
     } else if (inputMode === "formatter") {
-      // Python Formatter Mode with Dynamic Structure
-      const formatted = formatPythonCode(inputText);
+      // Use the smart template parser to organize into dynamic structure
       const { files: parsed, detectedProjectName } =
-        parseProjectTemplate(formatted);
+        parseProjectTemplate(inputText);
 
       files = parsed.map((f) => ({
         ...f,
