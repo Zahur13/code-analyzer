@@ -144,8 +144,8 @@ const parseProjectTemplate = (text) => {
   const files = [];
   let detectedProjectName = null;
 
-  // 1. Detect Project Name from specific patterns
-  const projectNamePatterns = [
+  // 1. Detect Project Name
+  const namePatterns = [
     /project_name\s*=\s*["']([^"']+)["']/,
     /^([a-zA-Z0-9_-]+)\/\s*$/m,
     /File Structure\s*\n\s*([a-zA-Z0-9_-]+)\//,
@@ -153,134 +153,110 @@ const parseProjectTemplate = (text) => {
     /project\s*name\s*[:=]\s*([a-zA-Z0-9_-]+)/i,
     /"name"\s*:\s*"([^"]+)"/,
   ];
-  for (const pattern of projectNamePatterns) {
-    const match = text.match(pattern);
-    if (match) {
-      detectedProjectName = match[1];
+  for (const p of namePatterns) {
+    const m = text.match(p);
+    if (m) {
+      detectedProjectName = m[1];
       break;
     }
   }
 
-  // 2. Discover all unique file paths in the whole text
-  const pathsFound = new Set();
+  // 2. Linear Scan for File Declarations
+  const lines = text.split("\n");
+  const declarations = []; // { path, lineIndex }
 
-  // Tree structure, Numbered lists, Python keys, Explicit markers, Bold headers
   const pathRegexes = [
-    /^[├──|└──|│\s]*([a-zA-Z0-9_./-]+\.[a-z0-9]+)/gm,
-    /^\d+\.\s+([a-zA-Z0-9_./-]+\.[a-z0-9]+)/gm,
-    /"([a-zA-Z0-9_./-]+\.[a-z0-9]+)"\s*:/g,
-    /^(?:\/\/|#)\s*file:\s*([a-zA-Z0-9_./-]+\.[a-z0-9]+)/gim,
-    /\*\*([a-zA-Z0-9_./-]+\.[a-z0-9]+)\*\*/g,
+    /^[├──|└──|│\s]*([a-zA-Z0-9_./-]+\.[a-z0-9]+)/, // File with extension
+    /^[├──|└──|│\s]*([a-zA-Z0-9_./-]+\/)/, // Folder
+    /^\d+\.\s+([a-zA-Z0-9_./-]+\.[a-z0-9]+)/,
+    /^(?:\/\/|#)\s*file:\s*([a-zA-Z0-9_./-]+\.[a-z0-9]+)/i,
+    /^\*\*([a-zA-Z0-9_./-]+\.[a-z0-9]+)\*\*/,
+    /"([a-zA-Z0-9_./-]+\.[a-z0-9]+)"\s*:/,
   ];
 
-  pathRegexes.forEach((regex) => {
-    let match;
-    while ((match = regex.exec(text)) !== null) {
-      pathsFound.add(match[1]);
-    }
-  });
-
-  // 3. For each unique path, find its content by checking all its occurrences
-  const uniquePaths = Array.from(pathsFound);
-
-  uniquePaths.forEach((path) => {
-    let content = "";
-    const escapedPath = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
-    // Check all indices where this path appears
-    const indices = [];
-    let idx = text.indexOf(path);
-    while (idx !== -1) {
-      indices.push(idx);
-      idx = text.indexOf(path, idx + 1);
-    }
-
-    // For each occurrence, look for content following it
-    for (const startIdx of indices) {
-      const afterHeader = text.substring(startIdx + path.length);
-
-      // Pass A: Python triple-quoted content immediately following
-      const pythonRegex = /^\s*["']\s*:\s*"""([\s\S]*?)"""/;
-      const pyMatch = afterHeader.match(pythonRegex);
-      if (pyMatch) {
-        content = pyMatch[1].trim();
+  lines.forEach((line, i) => {
+    for (const reg of pathRegexes) {
+      const m = line.match(reg);
+      if (m) {
+        let p = m[1].trim();
+        // Strip project name prefix if it exists
+        if (detectedProjectName && p.startsWith(detectedProjectName + "/")) {
+          p = p.substring(detectedProjectName.length + 1);
+        }
+        declarations.push({ path: p, lineIndex: i });
         break;
       }
-
-      // Pass B: Markdown code block following
-      // We look for a block that appears before any other file path starts
-      const mdMatch = afterHeader.match(
-        /^\s*[\s\S]*?```[a-z]*\n([\s\S]*?)\n```/,
-      );
-      if (mdMatch) {
-        // Verify no other path is between the current path and this code block
-        const textBeforeBlock = afterHeader.substring(0, mdMatch.index);
-        const anotherPathExists = uniquePaths.some(
-          (p) => p !== path && textBeforeBlock.includes(p),
-        );
-        if (!anotherPathExists) {
-          content = mdMatch[1].trim();
-          break;
-        }
-      }
-
-      // Pass C: "Copy" marker logic
-      const copyMatch = afterHeader.match(
-        /^\s*[\s\S]*?Copy\s+([\s\S]*?)(?=\n\s*\d+\.\s+|├──|└──|# file:|$)/,
-      );
-      if (copyMatch) {
-        const textBeforeCopy = afterHeader.substring(0, copyMatch.index);
-        const anotherPathExists = uniquePaths.some(
-          (p) => p !== path && textBeforeCopy.includes(p),
-        );
-        if (!anotherPathExists) {
-          content = copyMatch[1].trim();
-          // Remove any potential trailing headers
-          content = content
-            .split(/\n\s*\d+\.\s+/)[0]
-            .split(/\n\s*[├──|└──]/)[0]
-            .trim();
-          break;
-        }
-      }
-    }
-
-    if (path) {
-      let finalPath = path;
-      if (detectedProjectName && path.startsWith(detectedProjectName + "/")) {
-        finalPath = path.substring(detectedProjectName.length + 1);
-      }
-      files.push({ path: finalPath, content: content || "" });
     }
   });
 
-  // 4. Final heuristic: If we have blocks of code that weren't mapped,
-  // try to map them to the discovered structure based on content
-  const mappedContent = files.map((f) => f.content).join("\n");
-  const markdownBlocks = text.match(/```[a-z]*\n([\s\S]*?)\n```/g) || [];
+  // 3. Map Content between declarations
+  const fileMap = new Map(); // path -> content
 
-  markdownBlocks.forEach((block) => {
-    const cleanBlock = block.replace(/```[a-z]*\n|```/g, "").trim();
-    if (!mappedContent.includes(cleanBlock)) {
-      // Find the most appropriate file for this orphan block
+  declarations.forEach((decl, i) => {
+    const nextDecl = declarations[i + 1];
+    const start = decl.lineIndex + 1;
+    const end = nextDecl ? nextDecl.lineIndex : lines.length;
+
+    let chunk = lines.slice(start, end).join("\n").trim();
+
+    // Clean content artifacts
+    chunk = chunk
+      .replace(/^Copy\s*\n?/, "")
+      .replace(/\n?\s*Copy$/, "")
+      .trim();
+
+    const fenceMatch = chunk.match(/```[a-z]*\n([\s\S]*?)\n```/);
+    if (fenceMatch) {
+      chunk = fenceMatch[1].trim();
+    } else if (
+      chunk.includes("import ") ||
+      chunk.includes("const ") ||
+      chunk.includes("def ") ||
+      chunk.includes("class ")
+    ) {
+      // Keep code
+    } else if (chunk.length < 5) {
+      chunk = "";
+    }
+
+    if (decl.path.endsWith("/")) {
+      // It's a folder, ensure it exists (we'll add .gitkeep later)
+      if (!fileMap.has(decl.path)) fileMap.set(decl.path, null);
+    } else {
       if (
-        cleanBlock.includes("import React") ||
-        cleanBlock.includes("export default")
+        !fileMap.has(decl.path) ||
+        chunk.length > (fileMap.get(decl.path) || "").length
       ) {
-        const appFile = files.find((f) => f.path.endsWith("App.js"));
-        if (appFile && !appFile.content) appFile.content = cleanBlock;
-      } else if (
-        cleanBlock.includes("express") ||
-        cleanBlock.includes("app.listen")
-      ) {
-        const serverFile = files.find((f) => f.path.endsWith("server.js"));
-        if (serverFile && !serverFile.content) serverFile.content = cleanBlock;
-      } else if (cleanBlock.includes("@tailwind")) {
-        const cssFile = files.find((f) => f.path.endsWith("index.css"));
-        if (cssFile && !cssFile.content) cssFile.content = cleanBlock;
+        fileMap.set(decl.path, chunk);
       }
     }
   });
+
+  fileMap.forEach((content, path) => {
+    if (path.endsWith("/")) {
+      files.push({ path: `${path}.gitkeep`, content: "" });
+    } else {
+      files.push({ path, content: content || "" });
+    }
+  });
+
+  // Handle special cases from Master Prompt
+  const specialFiles = ["package-lock.json", "favicon.ico"];
+  specialFiles.forEach((sf) => {
+    const exists = files.find((f) => f.path.endsWith(sf));
+    if (!exists) {
+      // We could proactively add them if they are common in structure but missing content
+    }
+  });
+
+  // 4. Fallback: if no files found but there are markdown blocks
+  if (files.length === 0) {
+    const mdBlocks = text.match(/```[a-z]*\n([\s\S]*?)\n```/g) || [];
+    mdBlocks.forEach((block, i) => {
+      const content = block.replace(/```[a-z]*\n|```/g, "").trim();
+      files.push({ path: `file_${i + 1}.txt`, content });
+    });
+  }
 
   return { files, detectedProjectName };
 };
@@ -443,7 +419,7 @@ const RenderTree = ({ node, level = 0, selectedFile, setSelectedFile }) => {
         {node.name}
       </div>
       {isOpen &&
-        Object.values(node.children)
+        Object.values(node.children || {})
           .sort((a, b) => {
             if (a.isFolder && !b.isFolder) return -1;
             if (!a.isFolder && b.isFolder) return 1;
@@ -475,13 +451,94 @@ const App = () => {
   const [formattedOutput, setFormattedOutput] = useState("");
   const [copied, setCopied] = useState(false);
   const [selectedFile, setSelectedFile] = useState(null);
+  const [pythonScript, setPythonScript] = useState("");
 
-  // Sync zipName in formatter mode only on initial switch or when input is cleared
+  // Function to generate the Python Formatter Script
+  const generatePythonScript = useCallback((files, projectName) => {
+    const filesDict = {};
+    files.forEach((f) => {
+      filesDict[f.path] = f.content;
+    });
+
+    const script = `import os
+import zipfile
+from pathlib import Path
+
+# =========================
+# Desktop Path
+# =========================
+desktop_path = Path.home() / "Desktop"
+
+# Project Folder
+project_name = "${projectName || "project"}"
+project_path = desktop_path / project_name
+
+# =========================
+# File Structure & Content
+# =========================
+files = {
+${Object.entries(filesDict)
+  .map(
+    ([path, content]) =>
+      `    "${path}": """${content.replace(/"""/g, '\\"\\"\\""')}""",`,
+  )
+  .join("\n\n")}
+}
+
+# =========================
+# Create Files & Folders
+# =========================
+print(f"Creating project: {project_name}...")
+for file_path, content in files.items():
+    full_path = project_path / file_path
+
+    # Create folder if not exists
+    full_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Write content
+    with open(full_path, "w", encoding="utf-8") as file:
+        file.write(content)
+
+# =========================
+# Create ZIP File
+# =========================
+zip_path = desktop_path / f"{project_name}.zip"
+
+with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+    for root, dirs, filenames in os.walk(project_path):
+        for filename in filenames:
+            file_full_path = os.path.join(root, filename)
+
+            # Keep folder structure inside zip
+            arcname = os.path.relpath(file_full_path, project_path.parent)
+
+            zipf.write(file_full_path, arcname)
+
+print(f"\\n==========================================")
+print(f"SUCCESS!")
+print(f"Project created at: {project_path}")
+print(f"ZIP file created at: {zip_path}")
+print(f"==========================================")
+`;
+    return script;
+  }, []);
+
+  // Sync zipName and generate script in formatter mode
   useEffect(() => {
-    if (inputMode === "formatter" && !inputText.trim()) {
-      setZipName("code-analyzer");
+    if (inputMode === "formatter") {
+      if (!inputText.trim()) {
+        setZipName("code-analyzer");
+      }
+
+      if (parsedFiles.length > 0) {
+        setPythonScript(generatePythonScript(parsedFiles, zipName));
+      } else {
+        setPythonScript("");
+      }
+    } else {
+      setPythonScript("");
     }
-  }, [inputMode, inputText]);
+  }, [inputMode, inputText, parsedFiles, zipName, generatePythonScript]);
 
   // Apply theme
   useEffect(() => {
@@ -718,11 +775,16 @@ const App = () => {
     const root = { name: zipName || "project", children: {}, isFolder: true };
 
     parsedFiles.forEach((file) => {
-      const parts = file.path.split("/");
+      if (!file.path) return;
+
+      // Filter out empty parts and normalize path
+      const parts = file.path.split("/").filter((p) => p.trim() !== "");
       let current = root;
 
       parts.forEach((part, index) => {
-        if (index === parts.length - 1) {
+        const isLast = index === parts.length - 1;
+
+        if (isLast) {
           // It's a file
           current.children[part] = {
             name: part,
@@ -731,8 +793,8 @@ const App = () => {
             content: file.content,
           };
         } else {
-          // It's a folder
-          if (!current.children[part]) {
+          // It's a folder - ensure we don't overwrite a file with a folder
+          if (!current.children[part] || !current.children[part].isFolder) {
             current.children[part] = {
               name: part,
               children: {},
@@ -765,11 +827,18 @@ const App = () => {
 
     try {
       // Prepend the root folder name to every path to match requested structure
-      const rootFolderName = zipName || "code-analyzer";
-      const filesWithRoot = parsedFiles.map((f) => ({
-        ...f,
-        path: `${rootFolderName}/${f.path}`,
-      }));
+      const rootFolderName = (zipName || "code-analyzer").trim();
+      const filesWithRoot = parsedFiles.map((f) => {
+        // Normalize path: remove leading/trailing slashes and double slashes
+        const cleanPath = f.path
+          .split("/")
+          .filter((p) => p.trim() !== "")
+          .join("/");
+        return {
+          ...f,
+          path: `${rootFolderName}/${cleanPath}`,
+        };
+      });
 
       const response = await axios.post(
         "http://localhost:5001/create-zip",
@@ -974,24 +1043,71 @@ const App = () => {
               </span>
             </div>
 
-            {/* File Tree */}
-            <div className="file-tree">
-              {parsedFiles.length === 0 ? (
-                <div className="file-tree-empty">
-                  <span className="empty-icon">📂</span>
-                  <span>No files detected yet</span>
-                  <span style={{ fontSize: 11, opacity: 0.7 }}>
-                    Paste code on the left to see the structure
-                  </span>
+            {/* Master Mode Output (Preview + Script) */}
+            {inputMode === "formatter" && parsedFiles.length > 0 && (
+              <div className="master-mode-output">
+                <div className="master-section">
+                  <div className="master-header">
+                    <h3>==========================================</h3>
+                    <h3>PROJECT PREVIEW</h3>
+                    <h3>===============</h3>
+                  </div>
+                  <div className="file-tree master-tree">
+                    <RenderTree
+                      node={fileTree}
+                      selectedFile={selectedFile}
+                      setSelectedFile={setSelectedFile}
+                    />
+                  </div>
+                  <h3>==========================================</h3>
                 </div>
-              ) : (
-                <RenderTree
-                  node={fileTree}
-                  selectedFile={selectedFile}
-                  setSelectedFile={setSelectedFile}
-                />
-              )}
-            </div>
+
+                <div className="master-section">
+                  <div className="master-header">
+                    <h3>COMPLETE PYTHON FORMATTER SCRIPT</h3>
+                  </div>
+                  <div className="python-script-container glass-panel">
+                    <div className="script-header">
+                      <span>formatter.py</span>
+                      <button
+                        className="copy-btn"
+                        onClick={() => {
+                          navigator.clipboard.writeText(pythonScript);
+                          setCopied(true);
+                          setTimeout(() => setCopied(false), 2000);
+                        }}
+                      >
+                        {copied ? "✅ Copied!" : "📋 Copy Script"}
+                      </button>
+                    </div>
+                    <pre className="script-content">
+                      <code>{pythonScript}</code>
+                    </pre>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Default File Tree (hidden in formatter mode if we want strict master layout) */}
+            {inputMode !== "formatter" && (
+              <div className="file-tree">
+                {parsedFiles.length === 0 ? (
+                  <div className="file-tree-empty">
+                    <span className="empty-icon">📂</span>
+                    <span>No files detected yet</span>
+                    <span style={{ fontSize: 11, opacity: 0.7 }}>
+                      Paste code on the left to see the structure
+                    </span>
+                  </div>
+                ) : (
+                  <RenderTree
+                    node={fileTree}
+                    selectedFile={selectedFile}
+                    setSelectedFile={setSelectedFile}
+                  />
+                )}
+              </div>
+            )}
 
             {/* File Preview Section */}
             {selectedFile && (
