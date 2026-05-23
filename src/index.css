@@ -535,6 +535,43 @@ body {
   gap: 10px;
 }
 
+.preview-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.edit-btn,
+.save-btn {
+  background: var(--accent-glow);
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  padding: 4px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.save-btn {
+  background: var(--success);
+  color: white;
+  border-color: var(--success);
+}
+
+.edit-btn:hover {
+  background: var(--accent);
+  color: white;
+}
+
+.save-btn:hover {
+  filter: brightness(1.1);
+}
+
 .preview-path {
   font-family: 'Fira Code', monospace;
   font-size: 14px;
@@ -559,6 +596,8 @@ body {
   overflow: auto;
   padding: 20px;
   background: var(--bg-secondary);
+  display: flex;
+  flex-direction: column;
 }
 
 .preview-content pre {
@@ -571,6 +610,26 @@ body {
   line-height: 1.6;
   white-space: pre-wrap;
   color: var(--text-primary);
+}
+
+.edit-textarea {
+  flex: 1;
+  width: 100%;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 16px;
+  font-family: 'Fira Code', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  resize: none;
+  outline: none;
+  transition: border-color 0.3s ease;
+}
+
+.edit-textarea:focus {
+  border-color: var(--accent);
 }
 
 /* ========== Download Section ========== */

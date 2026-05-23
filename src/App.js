@@ -491,6 +491,8 @@ const App = () => {
   const [copied, setCopied] = useState(false);
   const [selectedFile, setSelectedFile] = useState(null);
   const [pythonScript, setPythonScript] = useState("");
+  const [isEditing, setIsEditing] = useState(false);
+  const [editContent, setEditContent] = useState("");
 
   // Function to generate the Python Formatter Script
   const generatePythonScript = useCallback((files, projectName) => {
@@ -712,6 +714,32 @@ print(f"==========================================")
       setStatusMsg(null);
     }
   }, [inputText, inputMode, rawFileName, parseTextSmart, parseTextRaw]);
+
+  // Handle editing initialization
+  useEffect(() => {
+    if (selectedFile) {
+      setEditContent(selectedFile.content || "");
+    } else {
+      setIsEditing(false);
+      setEditContent("");
+    }
+  }, [selectedFile]);
+
+  const handleSaveEdit = () => {
+    if (!selectedFile) return;
+
+    // Update parsedFiles state
+    setParsedFiles((prev) =>
+      prev.map((f) =>
+        f.path === selectedFile.path ? { ...f, content: editContent } : f,
+      ),
+    );
+
+    // Update selectedFile locally so the preview updates
+    setSelectedFile((prev) => ({ ...prev, content: editContent }));
+    setIsEditing(false);
+    setStatusMsg({ type: "success", text: "File updated successfully!" });
+  };
 
   // Recursive File Tree Structure
   const fileTree = useMemo(() => {
@@ -1044,17 +1072,40 @@ print(f"==========================================")
                       <span className="preview-icon">🔍</span>
                       <span className="preview-path">{selectedFile.path}</span>
                     </div>
-                    <button
-                      className="close-preview"
-                      onClick={() => setSelectedFile(null)}
-                    >
-                      ×
-                    </button>
+                    <div className="preview-actions">
+                      {isEditing ? (
+                        <button className="save-btn" onClick={handleSaveEdit}>
+                          💾 Save
+                        </button>
+                      ) : (
+                        <button
+                          className="edit-btn"
+                          onClick={() => setIsEditing(true)}
+                        >
+                          ✏️ Edit
+                        </button>
+                      )}
+                      <button
+                        className="close-preview"
+                        onClick={() => setSelectedFile(null)}
+                      >
+                        ×
+                      </button>
+                    </div>
                   </div>
                   <div className="preview-content">
-                    <pre>
-                      <code>{selectedFile.content}</code>
-                    </pre>
+                    {isEditing ? (
+                      <textarea
+                        className="edit-textarea"
+                        value={editContent}
+                        onChange={(e) => setEditContent(e.target.value)}
+                        autoFocus
+                      />
+                    ) : (
+                      <pre>
+                        <code>{selectedFile.content}</code>
+                      </pre>
+                    )}
                   </div>
                 </div>
               </>
