@@ -55,73 +55,6 @@ const detectExtension = (content) => {
   return ".txt";
 };
 
-// Detect language hint for markdown code blocks
-const detectLang = (content) => {
-  const trimmed = content.trim();
-  if (
-    trimmed.includes("import React") ||
-    trimmed.includes('from "react"') ||
-    trimmed.includes("jsx")
-  )
-    return "jsx";
-  if (trimmed.includes("<!DOCTYPE") || trimmed.includes("<html")) return "html";
-  if (trimmed.includes("body {") || trimmed.includes("@media")) return "css";
-  if (
-    trimmed.startsWith("def ") ||
-    trimmed.startsWith("import ") ||
-    trimmed.startsWith("class ")
-  )
-    return "python";
-  if (trimmed.startsWith("{")) {
-    try {
-      JSON.parse(trimmed);
-      return "json";
-    } catch (e) {}
-  }
-  if (trimmed.startsWith("#!/bin/bash")) return "bash";
-  if (
-    trimmed.includes("const ") ||
-    trimmed.includes("function ") ||
-    trimmed.includes("=>")
-  )
-    return "javascript";
-  return "";
-};
-
-// ---- Format converters ----
-const filesToPythonDict = (files) => {
-  let out = "files = {\n";
-  files.forEach((f, i) => {
-    const comma = i < files.length - 1 ? "," : "";
-    if (!f.content.trim()) {
-      out += `    "${f.path}": ""${comma}\n`;
-    } else {
-      out += `    "${f.path}": """${f.content}"""${comma}\n`;
-    }
-  });
-  out += "}\n";
-  return out;
-};
-
-const filesToMarkdown = (files) => {
-  return files
-    .map((f) => {
-      const lang = detectLang(f.content);
-      return `**${f.path}**\n\`\`\`${lang}\n${f.content}\n\`\`\``;
-    })
-    .join("\n\n");
-};
-
-const filesToDelimiter = (files) => {
-  return files.map((f) => `==== ${f.path} ====\n${f.content}`).join("\n\n");
-};
-
-const OUTPUT_FORMATS = [
-  { id: "python", label: "Python Dict" },
-  { id: "markdown", label: "Markdown" },
-  { id: "delimiter", label: "Delimiter" },
-];
-
 const PROJECT_TEMPLATE = [
   "backend/node_modules/.gitkeep",
   "backend/output/.gitkeep",
@@ -143,6 +76,7 @@ const PROJECT_TEMPLATE = [
 const parseProjectTemplate = (text) => {
   const files = [];
   let detectedProjectName = null;
+  const lines = text.split("\n");
 
   // 1. Detect Project Name
   const namePatterns = [
@@ -161,36 +95,130 @@ const parseProjectTemplate = (text) => {
     }
   }
 
-  // 2. Linear Scan for File Declarations
-  const lines = text.split("\n");
-  const declarations = []; // { path, lineIndex }
+  // 2. Stateful Linear Scan for File/Folder Declarations
+  const declarations = []; // { path, isFolder, lineIndex }
+  const stack = []; // To track directory hierarchy: [ { level, path } ]
 
-  const pathRegexes = [
-    /^[├──|└──|│\s]*([a-zA-Z0-9_./-]+\.[a-z0-9]+)/, // File with extension
-    /^[├──|└──|│\s]*([a-zA-Z0-9_./-]+\/)/, // Folder
-    /^\d+\.\s+([a-zA-Z0-9_./-]+\.[a-z0-9]+)/,
-    /^(?:\/\/|#)\s*file:\s*([a-zA-Z0-9_./-]+\.[a-z0-9]+)/i,
-    /^\*\*([a-zA-Z0-9_./-]+\.[a-z0-9]+)\*\*/,
-    /"([a-zA-Z0-9_./-]+\.[a-z0-9]+)"\s*:/,
-  ];
+  const normalizePath = (p) => {
+    let clean = p
+      .trim()
+      .replace(/^[├──|└──|│\s]+/, "")
+      .replace(/\/+$/, "");
+    if (detectedProjectName && clean.startsWith(detectedProjectName + "/")) {
+      clean = clean.substring(detectedProjectName.length + 1);
+    }
+    return clean.replace(/^\/+/, "");
+  };
 
   lines.forEach((line, i) => {
-    for (const reg of pathRegexes) {
+    const trimmedLine = line.trim();
+    if (!trimmedLine) return;
+
+    // A. Improved tree-like structure detection with depth tracking
+    // Match indent/markers and then the name
+    const treeMatch = line.match(/^([├──|└──|│\s]*)([a-zA-Z0-9_./-]+)/);
+
+    // We consider it a tree line if it has markers OR if it's deeply indented
+    const isTreeLine =
+      treeMatch &&
+      (trimmedLine.includes("├──") ||
+        trimmedLine.includes("└──") ||
+        trimmedLine.includes("│") ||
+        line.startsWith("    ") ||
+        line.startsWith("\t") ||
+        trimmedLine.endsWith("/"));
+
+    if (isTreeLine) {
+      const markers = treeMatch[1];
+      const name = treeMatch[2].trim();
+
+      // Robust Level Calculation
+      // 1. Convert markers to a consistent depth value
+      // 2. We assume level increases if the total leading character count increases significantly
+      let level = 0;
+      const markerChars = markers.split("");
+      markerChars.forEach((c) => {
+        if (c === "│") level += 1;
+        else if (c === "├" || c === "└") level += 1;
+        else if (c === "\t") level += 1;
+      });
+      // Fallback for space-only indentation (every 2-4 spaces = 1 level)
+      if (level === 0 && markers.length > 0) {
+        level = Math.max(1, Math.floor(markers.length / 2));
+      }
+
+      // CAVITY LIMIT: Allow up to 5 nested levels of directories/files tracing from tree
+      if (level > 5) return;
+
+      const cleanName = name.replace(/\/$/, "");
+
+      // Determine if it's a folder: ends with slash, has emoji, OR next line is more indented
+      const nextLine = lines[i + 1] || "";
+      const nextTreeMatch = nextLine.match(
+        /^([├──|└──|│\s]*)([a-zA-Z0-9_./-]+)/,
+      );
+      const nextIndent = nextTreeMatch ? nextTreeMatch[1].length : 0;
+
+      const isFolder =
+        name.endsWith("/") ||
+        line.includes("📁") ||
+        (nextTreeMatch && nextIndent > markers.length);
+
+      // Handle root folder
+      if (level === 0 && cleanName === detectedProjectName) return;
+
+      // Pop stack until we find the parent level
+      while (stack.length > 0 && stack[stack.length - 1].level >= level) {
+        stack.pop();
+      }
+
+      const parentPath = stack.map((s) => s.path).join("/");
+      const fullPath = parentPath ? `${parentPath}/${cleanName}` : cleanName;
+
+      if (isFolder) {
+        stack.push({ level, path: cleanName });
+        declarations.push({ path: fullPath, isFolder: true, lineIndex: i });
+      } else {
+        declarations.push({ path: fullPath, isFolder: false, lineIndex: i });
+      }
+      return;
+    }
+
+    // B. Match explicit path formats (full paths)
+    const otherRegexes = [
+      /^\d+\.\s+([a-zA-Z0-9_./-]+\.[a-z0-9]+)/,
+      /^(?:\/\/|#)\s*file:\s*([a-zA-Z0-9_./-]+\.[a-z0-9]+)/i,
+      /^\*\*([a-zA-Z0-9_./-]+\.[a-z0-9]+)\*\*/,
+      /"([a-zA-Z0-9_./-]+\.[a-z0-9]+)"\s*:/,
+    ];
+
+    for (const reg of otherRegexes) {
       const m = line.match(reg);
       if (m) {
-        let p = m[1].trim();
-        // Strip project name prefix if it exists
-        if (detectedProjectName && p.startsWith(detectedProjectName + "/")) {
-          p = p.substring(detectedProjectName.length + 1);
+        const p = normalizePath(m[1]);
+        if (p) {
+          declarations.push({ path: p, isFolder: false, lineIndex: i });
         }
-        declarations.push({ path: p, lineIndex: i });
-        break;
+        return;
       }
     }
   });
 
-  // 3. Map Content between declarations
-  const fileMap = new Map(); // path -> content
+  // 3. Map Content and Synthesize Directories
+  const fileMap = new Map(); // path -> { content, isFolder }
+
+  const ensureParents = (filePath) => {
+    const parts = filePath.split("/");
+    if (parts.length > 1) {
+      let currentPath = "";
+      for (let i = 0; i < parts.length - 1; i++) {
+        currentPath = currentPath ? `${currentPath}/${parts[i]}` : parts[i];
+        if (!fileMap.has(currentPath)) {
+          fileMap.set(currentPath, { content: null, isFolder: true });
+        }
+      }
+    }
+  };
 
   declarations.forEach((decl, i) => {
     const nextDecl = declarations[i + 1];
@@ -198,58 +226,47 @@ const parseProjectTemplate = (text) => {
     const end = nextDecl ? nextDecl.lineIndex : lines.length;
 
     let chunk = lines.slice(start, end).join("\n").trim();
-
-    // Clean content artifacts
     chunk = chunk
       .replace(/^Copy\s*\n?/, "")
       .replace(/\n?\s*Copy$/, "")
       .trim();
 
-    const fenceMatch = chunk.match(/```[a-z]*\n([\s\S]*?)\n```/);
-    if (fenceMatch) {
-      chunk = fenceMatch[1].trim();
-    } else if (
-      chunk.includes("import ") ||
-      chunk.includes("const ") ||
-      chunk.includes("def ") ||
-      chunk.includes("class ")
+    // Ignore noise chunks that look like re-printed tree structures
+    if (
+      chunk.match(/^[├──|└──|│]/m) &&
+      !chunk.includes("import ") &&
+      !chunk.includes("const ") &&
+      !chunk.includes("def ")
     ) {
-      // Keep code
-    } else if (chunk.length < 5) {
       chunk = "";
     }
 
-    if (decl.path.endsWith("/")) {
-      // It's a folder, ensure it exists (we'll add .gitkeep later)
-      if (!fileMap.has(decl.path)) fileMap.set(decl.path, null);
+    const fenceMatch = chunk.match(/```[a-z]*\n([\s\S]*?)\n```/);
+    if (fenceMatch) chunk = fenceMatch[1].trim();
+
+    ensureParents(decl.path);
+
+    if (decl.isFolder) {
+      if (!fileMap.has(decl.path))
+        fileMap.set(decl.path, { content: null, isFolder: true });
     } else {
-      if (
-        !fileMap.has(decl.path) ||
-        chunk.length > (fileMap.get(decl.path) || "").length
-      ) {
-        fileMap.set(decl.path, chunk);
+      const existing = fileMap.get(decl.path);
+      if (!existing || chunk.length > (existing.content || "").length) {
+        fileMap.set(decl.path, { content: chunk, isFolder: false });
       }
     }
   });
 
-  fileMap.forEach((content, path) => {
-    if (path.endsWith("/")) {
-      files.push({ path: `${path}.gitkeep`, content: "" });
+  // 4. Build final file list
+  fileMap.forEach((val, path) => {
+    if (val.isFolder) {
+      // Don't add .gitkeep files for empty folders as requested
     } else {
-      files.push({ path, content: content || "" });
+      files.push({ path, content: val.content || "" });
     }
   });
 
-  // Handle special cases from Master Prompt
-  const specialFiles = ["package-lock.json", "favicon.ico"];
-  specialFiles.forEach((sf) => {
-    const exists = files.find((f) => f.path.endsWith(sf));
-    if (!exists) {
-      // We could proactively add them if they are common in structure but missing content
-    }
-  });
-
-  // 4. Fallback: if no files found but there are markdown blocks
+  // Generic fallback
   if (files.length === 0) {
     const mdBlocks = text.match(/```[a-z]*\n([\s\S]*?)\n```/g) || [];
     mdBlocks.forEach((block, i) => {
@@ -271,11 +288,6 @@ const INPUT_MODES = [
     id: "raw",
     label: "📝 Raw Text",
     desc: "Paste raw code → converts to a downloadable file",
-  },
-  {
-    id: "auto",
-    label: "🔄 Auto Format",
-    desc: "Paste plain text → auto-converts to Python dict, Markdown, or delimiter format",
   },
   {
     id: "formatter",
@@ -399,7 +411,9 @@ const RenderTree = ({ node, level = 0, selectedFile, setSelectedFile }) => {
     return (
       <div
         className={`file-item ${isSelected ? "active" : ""}`}
-        style={{ paddingLeft: `${level * 16 + 12}px` }}
+        style={{
+          paddingLeft: `calc(${level} * var(--tree-indent, 16px) + 12px)`,
+        }}
         onClick={() => setSelectedFile(node)}
       >
         <span className="file-icon">📄</span>
@@ -412,7 +426,9 @@ const RenderTree = ({ node, level = 0, selectedFile, setSelectedFile }) => {
     <div className="folder-group">
       <div
         className="folder-name"
-        style={{ paddingLeft: `${level * 16 + 12}px` }}
+        style={{
+          paddingLeft: `calc(${level} * var(--tree-indent, 16px) + 12px)`,
+        }}
         onClick={() => setIsOpen(!isOpen)}
       >
         <span className="folder-icon">{isOpen ? "📂" : "📁"}</span>
@@ -447,8 +463,6 @@ const App = () => {
   const [statusMsg, setStatusMsg] = useState(null);
   const [inputMode, setInputMode] = useState("smart");
   const [rawFileName, setRawFileName] = useState("");
-  const [autoOutputFormat, setAutoOutputFormat] = useState("python");
-  const [formattedOutput, setFormattedOutput] = useState("");
   const [copied, setCopied] = useState(false);
   const [selectedFile, setSelectedFile] = useState(null);
   const [pythonScript, setPythonScript] = useState("");
@@ -623,68 +637,6 @@ print(f"==========================================")
     return [{ path: name, content: text }];
   }, []);
 
-  // Auto format parser — detects files from plain text and formats them
-  const parseTextAuto = useCallback((text) => {
-    if (!text.trim()) return [];
-    const files = [];
-    const addFile = (path, content) => {
-      const cleanPath = path.trim();
-      if (!cleanPath) return;
-      if (!files.find((f) => f.path === cleanPath)) {
-        files.push({ path: cleanPath, content });
-      }
-    };
-
-    // Try comment markers first: // file: path or # file: path
-    const commentFileRegex =
-      /(?:\/\/|#)\s*file:\s*(.*?)\s*\n([\s\S]*?)(?=(?:\/\/|#)\s*file:\s*|$)/gi;
-    let match;
-    while ((match = commentFileRegex.exec(text)) !== null) {
-      addFile(match[1].trim(), match[2].trim());
-    }
-    if (files.length > 0) return files;
-
-    // Try lines that look like file paths followed by code blocks
-    // Pattern: a line that looks like a path (has extension), then code until next path-like line
-    const lines = text.split("\n");
-    let currentPath = null;
-    let currentContent = [];
-
-    const looksLikeFilePath = (line) => {
-      const trimmed = line.trim();
-      // Must contain a dot for extension, look like a relative path, no spaces (or few)
-      return (
-        /^[a-zA-Z0-9_./-]+\.[a-zA-Z0-9]+\s*:?\s*$/.test(trimmed) ||
-        /^[a-zA-Z0-9_./-]+\.[a-zA-Z0-9]+$/.test(trimmed)
-      );
-    };
-
-    for (const line of lines) {
-      if (looksLikeFilePath(line)) {
-        // Save previous file
-        if (currentPath) {
-          addFile(currentPath, currentContent.join("\n").trim());
-        }
-        currentPath = line.trim().replace(/:$/, "");
-        currentContent = [];
-      } else if (currentPath) {
-        currentContent.push(line);
-      }
-    }
-    // Save last file
-    if (currentPath) {
-      addFile(currentPath, currentContent.join("\n").trim());
-    }
-
-    // If nothing detected, treat the entire text as a single file
-    if (files.length === 0 && text.trim()) {
-      const ext = detectExtension(text);
-      addFile(`code${ext}`, text.trim());
-    }
-
-    return files;
-  }, []);
-
   // Auto-parse on text/mode change
   useEffect(() => {
     let files;
@@ -709,24 +661,13 @@ print(f"==========================================")
         setZipName(detectedProjectName);
       }
     } else {
-      files = parseTextAuto(inputText);
+      files = [];
     }
     setParsedFiles(files);
 
     // Reset selected file if it's no longer in the list
     if (selectedFile && !files.find((f) => f.path === selectedFile.path)) {
       setSelectedFile(null);
-    }
-
-    // Generate formatted output for Auto mode
-    if (inputMode === "auto" && files.length > 0) {
-      let output = "";
-      if (autoOutputFormat === "python") output = filesToPythonDict(files);
-      else if (autoOutputFormat === "markdown") output = filesToMarkdown(files);
-      else output = filesToDelimiter(files);
-      setFormattedOutput(output);
-    } else {
-      setFormattedOutput("");
     }
 
     if (files.length > 0) {
@@ -740,35 +681,12 @@ print(f"==========================================")
         text:
           inputMode === "smart"
             ? "No files detected. Try a different format or switch mode."
-            : inputMode === "auto"
-              ? 'Could not detect files. Try adding "// file: path" markers or "filename.ext" headers.'
-              : "Enter some text to create a file.",
+            : "Enter some text to create a file.",
       });
     } else {
       setStatusMsg(null);
     }
-  }, [
-    inputText,
-    inputMode,
-    rawFileName,
-    autoOutputFormat,
-    parseTextSmart,
-    parseTextRaw,
-    parseTextAuto,
-  ]);
-
-  // Regenerate formatted output when format changes
-  useEffect(() => {
-    if (inputMode === "auto" && parsedFiles.length > 0) {
-      let output = "";
-      if (autoOutputFormat === "python")
-        output = filesToPythonDict(parsedFiles);
-      else if (autoOutputFormat === "markdown")
-        output = filesToMarkdown(parsedFiles);
-      else output = filesToDelimiter(parsedFiles);
-      setFormattedOutput(output);
-    }
-  }, [autoOutputFormat, parsedFiles, inputMode]);
+  }, [inputText, inputMode, rawFileName, parseTextSmart, parseTextRaw]);
 
   // Recursive File Tree Structure
   const fileTree = useMemo(() => {
@@ -970,22 +888,6 @@ print(f"==========================================")
               />
             )}
 
-            {/* Auto mode: format selector */}
-            {inputMode === "auto" && (
-              <div className="format-selector">
-                <span className="format-label">Output format:</span>
-                {OUTPUT_FORMATS.map((fmt) => (
-                  <button
-                    key={fmt.id}
-                    className={`format-btn ${autoOutputFormat === fmt.id ? "active" : ""}`}
-                    onClick={() => setAutoOutputFormat(fmt.id)}
-                  >
-                    {fmt.label}
-                  </button>
-                ))}
-              </div>
-            )}
-
             {statusMsg && (
               <div className={`status-bar ${statusMsg.type}`}>
                 <span>
@@ -1006,11 +908,9 @@ print(f"==========================================")
               placeholder={
                 inputMode === "smart"
                   ? `Paste formatted code here...\n\nSupported formats:\n\n─── Python Dictionary ───\n"src/App.js": """const App = () => {};"""\n\n─── Markdown ───\n**src/App.js**\n\`\`\`javascript\nconst App = () => {};\n\`\`\`\n\n─── Delimiters ───\n==== src/App.js ====\nconst App = () => {};`
-                  : inputMode === "auto"
-                    ? `Paste plain text here to auto-format...\n\nTip: Use "// file: path" markers or put filenames\non their own line:\n\nsrc/App.js\nimport React from 'react';\nconst App = () => <div>Hello</div>;\nexport default App;\n\nsrc/index.css\nbody { margin: 0; }\n\nThe output will be auto-converted to your\nchosen format (Python dict, Markdown, etc.)`
-                    : inputMode === "formatter"
-                      ? `Paste code here to organize into code-analyzer structure...\n\nWe'll automatically detect and place:\n- Express/Multer code → backend/server.js\n- React/JSX code → src/App.js\n- CSS/Tailwind → src/index.css\n- Config files → tailwind.config.js, etc.\n\nYou can also use markers:\n# file: my_script.py\nprint("hello")`
-                      : `Paste any raw code here...\n\nIt will be saved as a single file.\nSet the filename above, or leave it empty\nand we'll auto-detect the type.\n\n─── Multi-file tip ───\n// file: src/index.js\nconsole.log("hello");\n\n// file: src/utils.js\nexport const add = (a, b) => a + b;`
+                  : inputMode === "formatter"
+                    ? `Paste code here to organize into code-analyzer structure...\n\nWe'll automatically detect and place:\n- Express/Multer code → backend/server.js\n- React/JSX code → src/App.js\n- CSS/Tailwind → src/index.css\n- Config files → tailwind.config.js, etc.\n\nYou can also use markers:\n# file: my_script.py\nprint("hello")`
+                    : `Paste any raw code here...\n\nIt will be saved as a single file.\nSet the filename above, or leave it empty\nand we'll auto-detect the type.\n\n─── Multi-file tip ───\n// file: src/index.js\nconsole.log("hello");\n\n// file: src/utils.js\nexport const add = (a, b) => a + b;`
               }
             />
 
@@ -1048,9 +948,7 @@ print(f"==========================================")
               <div className="master-mode-output">
                 <div className="master-section">
                   <div className="master-header">
-                    <h3>==========================================</h3>
                     <h3>PROJECT PREVIEW</h3>
-                    <h3>===============</h3>
                   </div>
                   <div className="file-tree master-tree">
                     <RenderTree
@@ -1059,7 +957,6 @@ print(f"==========================================")
                       setSelectedFile={setSelectedFile}
                     />
                   </div>
-                  <h3>==========================================</h3>
                 </div>
 
                 <div className="master-section">
@@ -1111,25 +1008,31 @@ print(f"==========================================")
 
             {/* File Preview Section */}
             {selectedFile && (
-              <div className="file-preview-panel glass-panel">
-                <div className="preview-header">
-                  <div className="preview-info">
-                    <span className="preview-icon">🔍</span>
-                    <span className="preview-path">{selectedFile.path}</span>
+              <>
+                <div
+                  className="preview-overlay"
+                  onClick={() => setSelectedFile(null)}
+                />
+                <div className="file-preview-panel glass-panel">
+                  <div className="preview-header">
+                    <div className="preview-info">
+                      <span className="preview-icon">🔍</span>
+                      <span className="preview-path">{selectedFile.path}</span>
+                    </div>
+                    <button
+                      className="close-preview"
+                      onClick={() => setSelectedFile(null)}
+                    >
+                      ×
+                    </button>
                   </div>
-                  <button
-                    className="close-preview"
-                    onClick={() => setSelectedFile(null)}
-                  >
-                    ×
-                  </button>
+                  <div className="preview-content">
+                    <pre>
+                      <code>{selectedFile.content}</code>
+                    </pre>
+                  </div>
                 </div>
-                <div className="preview-content">
-                  <pre>
-                    <code>{selectedFile.content}</code>
-                  </pre>
-                </div>
-              </div>
+              </>
             )}
 
             {/* Download Section */}
