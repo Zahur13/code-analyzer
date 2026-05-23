@@ -493,6 +493,7 @@ const App = () => {
   const [pythonScript, setPythonScript] = useState("");
   const [isEditing, setIsEditing] = useState(false);
   const [editContent, setEditContent] = useState("");
+  const [manualOverrides, setManualOverrides] = useState({}); // path -> content
 
   // Function to generate the Python Formatter Script
   const generatePythonScript = useCallback((files, projectName) => {
@@ -690,7 +691,17 @@ print(f"==========================================")
     } else {
       files = [];
     }
-    setParsedFiles(files);
+
+    // Apply manual overrides to parsed files
+    const finalFiles = files.map((f) => ({
+      ...f,
+      content:
+        manualOverrides[f.path] !== undefined
+          ? manualOverrides[f.path]
+          : f.content,
+    }));
+
+    setParsedFiles(finalFiles);
 
     // Reset selected file if it's no longer in the list
     if (selectedFile && !files.find((f) => f.path === selectedFile.path)) {
@@ -713,7 +724,14 @@ print(f"==========================================")
     } else {
       setStatusMsg(null);
     }
-  }, [inputText, inputMode, rawFileName, parseTextSmart, parseTextRaw]);
+  }, [
+    inputText,
+    inputMode,
+    rawFileName,
+    parseTextSmart,
+    parseTextRaw,
+    manualOverrides,
+  ]);
 
   // Handle editing initialization
   useEffect(() => {
@@ -728,14 +746,13 @@ print(f"==========================================")
   const handleSaveEdit = () => {
     if (!selectedFile) return;
 
-    // Update parsedFiles state
-    setParsedFiles((prev) =>
-      prev.map((f) =>
-        f.path === selectedFile.path ? { ...f, content: editContent } : f,
-      ),
-    );
+    // Store in manual overrides
+    setManualOverrides((prev) => ({
+      ...prev,
+      [selectedFile.path]: editContent,
+    }));
 
-    // Update selectedFile locally so the preview updates
+    // Update selectedFile locally so the preview updates immediately
     setSelectedFile((prev) => ({ ...prev, content: editContent }));
     setIsEditing(false);
     setStatusMsg({ type: "success", text: "File updated successfully!" });
