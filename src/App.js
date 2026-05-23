@@ -114,18 +114,43 @@ const parseProjectTemplate = (text) => {
     const trimmedLine = line.trim();
     if (!trimmedLine) return;
 
-    // A. Improved tree-like structure detection with depth tracking
+    // A. PRIORITY: Match explicit path formats (full paths)
+    // This must happen before tree detection to avoid indented code being seen as a tree
+    const otherRegexes = [
+      /^\d+\.\s+([a-zA-Z0-9_./-]+\.[a-z0-9]+)/, // 1. src/App.js
+      /^(?:\/\/|#)\s*file:\s*([a-zA-Z0-9_./-]+\.[a-z0-9]+)/i, // // file: src/App.js
+      /^\*\*([a-zA-Z0-9_./-]+\.[a-z0-9]+)\*\*/, // **src/App.js**
+      /"([a-zA-Z0-9_./-]+\.[a-z0-9]+)"\s*:/, // "src/App.js":
+      /^([a-zA-Z0-9_./-]+\.[a-z0-9]+)$/i, // Plain path: src/App.js
+      /^([a-zA-Z0-9_./-]+\/)$/, // Plain directory: src/
+      /^[📁📄]\s*([a-zA-Z0-9_./-]+)/, // Emoji markers: 📄 src/App.js
+      /^path[:=]\s*([a-zA-Z0-9_./-]+)/i, // path: src/App.js
+      /^([a-zA-Z0-9_./-]+\.[a-z0-9]+)\s*[:=]\s*$/i, // src/App.js:
+      /^#+\s+`?([a-zA-Z0-9_./-]+\.[a-z0-9]+)`?$/i, // ### `src/App.js`
+      /^`([a-zA-Z0-9_./-]+\.[a-z0-9]+)`$/i, // `src/App.js`
+    ];
+
+    for (const reg of otherRegexes) {
+      const m = trimmedLine.match(reg);
+      if (m) {
+        const p = normalizePath(m[1]);
+        if (p) {
+          declarations.push({ path: p, isFolder: false, lineIndex: i });
+        }
+        return;
+      }
+    }
+
+    // B. Stateful Linear Scan for Tree-like Structure
     // Match indent/markers and then the name
     const treeMatch = line.match(/^([├──|└──|│\s]*)([a-zA-Z0-9_./-]+)/);
 
-    // We consider it a tree line if it has markers OR if it's deeply indented
+    // We consider it a tree line if it has markers OR if it's a directory
     const isTreeLine =
       treeMatch &&
       (trimmedLine.includes("├──") ||
         trimmedLine.includes("└──") ||
         trimmedLine.includes("│") ||
-        line.startsWith("    ") ||
-        line.startsWith("\t") ||
         trimmedLine.endsWith("/"));
 
     if (isTreeLine) {
@@ -133,8 +158,6 @@ const parseProjectTemplate = (text) => {
       const name = treeMatch[2].trim();
 
       // Robust Level Calculation
-      // 1. Convert markers to a consistent depth value
-      // 2. We assume level increases if the total leading character count increases significantly
       let level = 0;
       const markerChars = markers.split("");
       markerChars.forEach((c) => {
@@ -147,12 +170,10 @@ const parseProjectTemplate = (text) => {
         level = Math.max(1, Math.floor(markers.length / 2));
       }
 
-      // CAVITY LIMIT: Allow up to 5 nested levels of directories/files tracing from tree
       if (level > 5) return;
 
       const cleanName = name.replace(/\/$/, "");
 
-      // Determine if it's a folder: ends with slash, has emoji, OR next line is more indented
       const nextLine = lines[i + 1] || "";
       const nextTreeMatch = nextLine.match(
         /^([├──|└──|│\s]*)([a-zA-Z0-9_./-]+)/,
@@ -164,10 +185,8 @@ const parseProjectTemplate = (text) => {
         line.includes("📁") ||
         (nextTreeMatch && nextIndent > markers.length);
 
-      // Handle root folder
       if (level === 0 && cleanName === detectedProjectName) return;
 
-      // Pop stack until we find the parent level
       while (stack.length > 0 && stack[stack.length - 1].level >= level) {
         stack.pop();
       }
@@ -182,25 +201,6 @@ const parseProjectTemplate = (text) => {
         declarations.push({ path: fullPath, isFolder: false, lineIndex: i });
       }
       return;
-    }
-
-    // B. Match explicit path formats (full paths)
-    const otherRegexes = [
-      /^\d+\.\s+([a-zA-Z0-9_./-]+\.[a-z0-9]+)/,
-      /^(?:\/\/|#)\s*file:\s*([a-zA-Z0-9_./-]+\.[a-z0-9]+)/i,
-      /^\*\*([a-zA-Z0-9_./-]+\.[a-z0-9]+)\*\*/,
-      /"([a-zA-Z0-9_./-]+\.[a-z0-9]+)"\s*:/,
-    ];
-
-    for (const reg of otherRegexes) {
-      const m = line.match(reg);
-      if (m) {
-        const p = normalizePath(m[1]);
-        if (p) {
-          declarations.push({ path: p, isFolder: false, lineIndex: i });
-        }
-        return;
-      }
     }
   });
 
@@ -225,24 +225,36 @@ const parseProjectTemplate = (text) => {
     const start = decl.lineIndex + 1;
     const end = nextDecl ? nextDecl.lineIndex : lines.length;
 
-    let chunk = lines.slice(start, end).join("\n").trim();
-    chunk = chunk
-      .replace(/^Copy\s*\n?/, "")
-      .replace(/\n?\s*Copy$/, "")
-      .trim();
+    // Use a more precise slice without aggressive trimming initially
+    let chunk = lines.slice(start, end).join("\n");
+
+    // Clean up specific artifacts but keep code structure
+    chunk = chunk.replace(/^Copy\s*\n?/, "").replace(/\n?\s*Copy$/, "");
 
     // Ignore noise chunks that look like re-printed tree structures
-    if (
+    // BUT only if they don't contain actual code indicators
+    const isTreeNoise =
       chunk.match(/^[├──|└──|│]/m) &&
       !chunk.includes("import ") &&
       !chunk.includes("const ") &&
-      !chunk.includes("def ")
-    ) {
+      !chunk.includes("def ") &&
+      !chunk.includes("function ") &&
+      !chunk.includes("class ");
+
+    if (isTreeNoise) {
       chunk = "";
     }
 
     const fenceMatch = chunk.match(/```[a-z]*\n([\s\S]*?)\n```/);
-    if (fenceMatch) chunk = fenceMatch[1].trim();
+    if (fenceMatch) {
+      chunk = fenceMatch[1];
+    } else {
+      // Fallback: strip leading and trailing fences line-by-line if full match fails
+      chunk = chunk
+        .replace(/^```[a-z]*\s*\n?/i, "")
+        .replace(/\n?```\s*$/i, "")
+        .trim();
+    }
 
     ensureParents(decl.path);
 
@@ -251,8 +263,21 @@ const parseProjectTemplate = (text) => {
         fileMap.set(decl.path, { content: null, isFolder: true });
     } else {
       const existing = fileMap.get(decl.path);
-      if (!existing || chunk.length > (existing.content || "").length) {
-        fileMap.set(decl.path, { content: chunk, isFolder: false });
+      // If we already have content, only append if this chunk is substantial
+      // or if it's the first time we're seeing this file
+      const trimmedChunk = chunk.trim();
+      if (!existing || trimmedChunk.length > 0) {
+        // If file exists, we merge carefully or replace if this is a better match
+        const currentContent = existing ? existing.content : "";
+        // If the new chunk starts with common code markers, it's likely the "real" content
+        const isBetterMatch =
+          trimmedChunk.length > currentContent.length ||
+          (trimmedChunk.includes("import ") &&
+            !currentContent.includes("import "));
+
+        if (!existing || isBetterMatch) {
+          fileMap.set(decl.path, { content: chunk, isFolder: false });
+        }
       }
     }
   });
