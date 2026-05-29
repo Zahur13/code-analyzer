@@ -1,10 +1,10 @@
 # Code Analyzer - AI-Powered Code Quality Tool
 
-![Code Analyzer Banner](https://coresg-normal.trae.ai/api/v1/text_to_image?prompt=Professional%20code%20analyzer%20banner%20with%20gradient%20purple%20and%20blue%20colors%2C%20modern%20design&image_size=square_hd)
+![Code Analyzer Banner](images/screenshot.png)
 
 ## 🚀 Live Demo
 
-[Deployed on Vercel](https://your-vercel-url.vercel.app)
+[Deployed on Vercel](https://code-analyzer-five.vercel.app/)
 
 ## 📋 Overview
 
@@ -16,12 +16,12 @@ A full-stack code analyzer and ZIP generator with AI-powered insights. Features 
 
 - React 18.2.0
 - React Router DOM 7.1.5
-- Tailwind CSS
-- Axios
+- Tailwind CSS 3.4.1
+- Axios 1.5.0
 
 ### Backend
 
-- Node.js
+- Node.js 20.18.2
 - Express 5.2.1
 - JWT Authentication
 - Multer (File Uploads)
@@ -31,7 +31,7 @@ A full-stack code analyzer and ZIP generator with AI-powered insights. Features 
 
 ### Deployment
 
-- Vercel
+- Vercel 2.0.0
 
 ## ✨ Features
 
