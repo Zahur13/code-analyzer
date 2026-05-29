@@ -20,10 +20,13 @@
     "react-scripts": "5.0.1"
   },
   "scripts": {
-    "start": "react-scripts start",
+    "start": "node backend/server.js",
     "build": "react-scripts build",
     "dev": "react-scripts start",
     "server": "node backend/server.js"
+  },
+  "engines": {
+    "node": "20.x"
   },
   "main": "postcss.config.js",
   "keywords": [],

@@ -3,12 +3,6 @@ import axios from "axios";
 
 const AuthContext = createContext();
 
-// Set base URL for axios
-const API_BASE_URL =
-  process.env.NODE_ENV === "production" ? "" : "http://localhost:5001";
-
-axios.defaults.baseURL = API_BASE_URL;
-
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
