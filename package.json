@@ -26,7 +26,7 @@
     "server": "node backend/server.js"
   },
   "engines": {
-    "node": "20.x"
+    "node": "24.x"
   },
   "main": "postcss.config.js",
   "keywords": [],
