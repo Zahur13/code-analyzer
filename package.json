@@ -6,7 +6,7 @@
   "dependencies": {
     "adm-zip": "^0.5.16",
     "archiver": "^8.0.0",
-    "axios": "^1.7.7",
+    "axios": "^1.7.1",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.6",
     "dotenv": "^16.4.7",
